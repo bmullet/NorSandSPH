@@ -50,11 +50,14 @@ eta_func = @(p, pi) (M/N)*(1 - (1-N)*(p./pi).^(N/(1-N)));
 F_func = @(p, q, pi) q + eta_func(p, pi).*p;
 
 figure
-xlim([-200e3, 0])
-ylim([0,100]*1e3)
+xlim(1*[-8e5, 0e5])
+ylim(1*[0, 80e4])
 
 hold on
 fimplicit(@(p, q) F_func(p, q, p_i0))
+fimplicit(@(p, q) q + M*p);
+xlabel("p")
+ylabel("q")
 plot(xlim, [0,0], '--r')
 
 % Set up isotropic elastic stiffness matrix
@@ -97,10 +100,14 @@ plot_p_q(sigma0, -1);
 drawnow
 
 % compression in x direction
-EPS = 1.5e-1*[-1, 0, 0; 0, 0.2, 0; 0, 0, 0.2]; % matches Ronnie's figure
-%EPS = 1.5e-1*[0, 1, 0; 1, 0, 0; 0, 0, 0]; % matches Ronnie's figure
+%EPS = 1.5e-1*[-1, 0, 0; 0, 0.2, 0; 0, 0, 0.2]; % matches Ronnie's figure
+%EPS = 1.5e-1*[-1, 0, 0; 0, 0, 0; 0, 0, 0]; 
+%EPS = 1.5e-1*[0, 1, 0; 1, 0, 0; 0, 0, 0]; 
+EPS = 1.5e-1*[-1, .5, 0; .5, -1, 0; 0, 0, -1]; 
 
-NUM_STEPS = 100; 
+
+
+NUM_STEPS = 1000; 
 
 sigma = sigma0;         % stress
 eps_tot = eps0;         % total strain
@@ -114,9 +121,13 @@ for i =1:NUM_STEPS
    delta_eps = EPS/NUM_STEPS;
    
    eps_tot = eps_tot + delta_eps;
+   v = params.v0*(1 + trace(eps_tot));  % specific volume
    
    eps_e_tr = eps_e + delta_eps;        % elastic trial strain
-   nhat = eps_e_tr / norm(eps_e_tr);
+   [eps_e_v_tr, ~] = split_epsilon(eps_e_tr);
+   e_e_tr = eps_e_tr - 1/3*eps_e_v_tr*eye(3);
+   
+   nhat = e_e_tr ./ norm(e_e_tr);
   
    delta_sigma_tr = hookes(delta_eps, K, G);
    sigma_tr = sigma + delta_sigma_tr;
@@ -142,9 +153,6 @@ for i =1:NUM_STEPS
        % Borja and Andrade (2005)
        
        dlambda = 0;
-       
-       
-       v = params.v0*(1 + trace(eps_tot));
        
        eps_e_k = eps_e_tr; % Iterator for elastic strain
        sigma_k = sigma_tr; % Iterator for sigma
@@ -193,23 +201,34 @@ for i =1:NUM_STEPS
            
        end
        
+       assert(dlambda > 0)
+       
        p_i_n = p_i;
        sigma = sigma_k;
        eps_e = eps_e_k;
        Fk = F_from_sigma(sigma, p_i, params);
     
    end
-   plot_pi(p_i_n, Fk, i)
-   
-   plot_p_q(sigma, Fk)
+   if (mod(i, NUM_STEPS/10) == 0)
+    plot_pi(p_i_n, Fk, i)
+    plot_p_q(sigma, Fk)
+    plot_v(v, i);
+    figure(1)
+    fimplicit(@(p, q) F_func(p, q, p_i))
+   end
     
+end
+
+function plot_v(v,i)
+figure(3)
+plot(i, v, 'or')
+hold on
 end
 
 function r_prime = get_jacobian(eps_tot, eps_e, p_i, dlambda, params)
 
 sigma = hookes(eps_e, params.K, params.G);
 p = get_p(sigma);
-q = get_q(sigma);
 
 pstar = get_pstar(params, sigma, eps_tot, p_i);
 
@@ -221,7 +240,7 @@ N = params.N;
 dFdp = (M/N)*(1 - (p/p_i)^(N/(1-N)));
 dFdq = 1;
 
-dFdpi = M*(p/p_i)^(N/(1-N));
+dFdpi = M*(p/p_i)^(1/(1-N));
 
 coeff = params.lambda_tilde*params.alpha_bar*(1 - params.N)...
                    /(params.M - params.alpha_bar*psi*params.N);
@@ -242,10 +261,9 @@ D = [D11, D12, D13;
      D21, D22, D23;
      D31, D32, D33;];
      
-
-H1 = -1/(1-params.N)*(params.M/p)*(p/p_i)^(params.N/(1-N));
+H1 = -1/(1-params.N)*(params.M/p)*(p/p_i)^(params.N/(1-params.N));
 H2 = 0;
-H3 = 1/(1-params.N)*(params.M/p)*(p/p_i)^(params.N/(1-params.N));
+H3 = 1/(1-params.N)*(params.M/p)*(p/p_i)^(1/(1-params.N));
 
 H = [H1, H2, H3];
 
@@ -259,7 +277,7 @@ r22 = 1;
 r23 = dFdq;
 r31 = D11*dFdp + D21*dFdq + D31*dFdpi;
 r32 = D12*dFdp + D22*dFdq + D32*dFdpi;
-r33 = dFdpi;
+r33 = D33*dFdpi;
 
 r_prime = [r11, r12, r13;
            r21, r22, r23;
@@ -273,8 +291,6 @@ function [r, x] = get_residual(eps_e, eps_e_tr, dlambda, p_i, params)
 
 M = params.M;
 N = params.N;
-
-
 
 sigma = hookes(eps_e, params.K, params.G);
 p = get_p(sigma);
