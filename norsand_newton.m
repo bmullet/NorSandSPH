@@ -11,7 +11,8 @@ close all;
 clc;
 clear all;
 
-tol = 1e-4;                        % Integration tolerance
+p_i_tol = 1;                    % p_i loop tolerance
+r_tol = 1;                      % Outer loop tolerance
 
 % NorSand model parameters
 lambda_tilde = 0.04;            % Compressibility
@@ -42,6 +43,7 @@ params.K = K;
 params.vc0 = vc0;
 params.v0 = v0;
 params.alpha_bar = alpha_bar;
+params.beta = beta;
 
 % Failure function
 eta_func = @(p, pi) (M/N)*(1 - (1-N)*(p./pi).^(N/(1-N)));
@@ -98,7 +100,7 @@ drawnow
 EPS = 1.5e-1*[-1, 0, 0; 0, 0.2, 0; 0, 0, 0.2]; % matches Ronnie's figure
 %EPS = 1.5e-1*[0, 1, 0; 1, 0, 0; 0, 0, 0]; % matches Ronnie's figure
 
-NUM_STEPS = 1000; 
+NUM_STEPS = 100; 
 
 sigma = sigma0;         % stress
 eps_tot = eps0;         % total strain
@@ -111,12 +113,11 @@ p_i_n = p_i0;
 for i =1:NUM_STEPS
    delta_eps = EPS/NUM_STEPS;
    
-    
    eps_tot = eps_tot + delta_eps;
    
    eps_e_tr = eps_e + delta_eps;        % elastic trial strain
+   nhat = eps_e_tr / norm(eps_e_tr);
   
-   
    delta_sigma_tr = hookes(delta_eps, K, G);
    sigma_tr = sigma + delta_sigma_tr;
    
@@ -139,12 +140,179 @@ for i =1:NUM_STEPS
    else
        % Iterate for plastic corrector etc as in steps 5-7, Box 2 of
        % Borja and Andrade (2005)
+       
+       dlambda = 0;
+       
+       
+       v = params.v0*(1 + trace(eps_tot));
+       
+       eps_e_k = eps_e_tr; % Iterator for elastic strain
+       sigma_k = sigma_tr; % Iterator for sigma
+       
+       [r, x] = get_residual(eps_e_k, eps_e_tr, dlambda, p_i_n, params);
+       
+       p_i = p_i_n;
+      
+       while norm(r) > r_tol
+           % Step 5: plastic corrector
+           % [done at the end of the loop]
+
+           % Step 6: Update plastic internal variable
+           p_i = p_i_n;
+           r_pi = 100; % Nominal value to force loop at least once
+           
+           while r_pi > p_i_tol
+               
+               psi = get_psi(params, eps_tot, p_i);
+               pstar = get_pstar(params, sigma_k, eps_tot, p_i);
+               
+               r_pi = p_i - p_i_n + dlambda*h*(p_i - pstar);
+               
+               coeff = params.lambda_tilde*params.alpha_bar*(1 - params.N)...
+                   /(params.M - params.alpha_bar*psi*params.N);
+               
+               r_pi_prime = 1 + h*dlambda*(1 - coeff*(pstar/p_i));
+               
+               p_i = p_i - r_pi/r_pi_prime;
+               
+           end
+           
+           % Step 7: Discrete consistency condition
+           [r, x] = get_residual(eps_e_k, eps_e_tr, dlambda, p_i, params);
+           r_prime = get_jacobian(eps_tot, eps_e_k, p_i, dlambda, params);
+           
+           delta_x = r_prime \ (-r);
+           x = x + delta_x;
+           
+           eps_e_v_k = x(1);
+           eps_e_s_k = x(2);
+           dlambda = x(3);
+           
+           eps_e_k = 1/3*eps_e_v_k*eye(3) + sqrt(3/2)*eps_e_s_k*nhat;
+           sigma_k = hookes(eps_e_k, params.K, params.G);
+           
+       end
+       
+       p_i_n = p_i;
+       sigma = sigma_k;
+       eps_e = eps_e_k;
+       Fk = F_from_sigma(sigma, p_i, params);
     
    end
    plot_pi(p_i_n, Fk, i)
    
    plot_p_q(sigma, Fk)
     
+end
+
+function r_prime = get_jacobian(eps_tot, eps_e, p_i, dlambda, params)
+
+sigma = hookes(eps_e, params.K, params.G);
+p = get_p(sigma);
+q = get_q(sigma);
+
+pstar = get_pstar(params, sigma, eps_tot, p_i);
+
+psi = get_psi(params, eps_tot, p_i);
+
+M = params.M;
+N = params.N;
+
+dFdp = (M/N)*(1 - (p/p_i)^(N/(1-N)));
+dFdq = 1;
+
+dFdpi = M*(p/p_i)^(N/(1-N));
+
+coeff = params.lambda_tilde*params.alpha_bar*(1 - params.N)...
+                   /(params.M - params.alpha_bar*psi*params.N);
+               
+c = 1 + params.h*dlambda*(1 - coeff*(pstar/p));
+
+D11 = params.K;
+D12 = 0;
+D13 = 0;
+D21 = 0;
+D22 = 3*params.G;
+D23 = 0;
+D31 = (1/c)*params.h*dlambda*(pstar/p)*D11;
+D32 = (1/c)*params.h*dlambda*(pstar/p)*D12;
+D33 = -(1/c)*params.h*(p_i - pstar);
+
+D = [D11, D12, D13;
+     D21, D22, D23;
+     D31, D32, D33;];
+     
+
+H1 = -1/(1-params.N)*(params.M/p)*(p/p_i)^(params.N/(1-N));
+H2 = 0;
+H3 = 1/(1-params.N)*(params.M/p)*(p/p_i)^(params.N/(1-params.N));
+
+H = [H1, H2, H3];
+
+G = H*D;
+
+r11 = 1+dlambda*params.beta*G(1);
+r12 = dlambda*params.beta*G(2);
+r13 = params.beta*(dFdp + dlambda*G(3));
+r21 = 0;
+r22 = 1;
+r23 = dFdq;
+r31 = D11*dFdp + D21*dFdq + D31*dFdpi;
+r32 = D12*dFdp + D22*dFdq + D32*dFdpi;
+r33 = dFdpi;
+
+r_prime = [r11, r12, r13;
+           r21, r22, r23;
+           r31, r32, r33];
+
+end
+
+function [r, x] = get_residual(eps_e, eps_e_tr, dlambda, p_i, params)
+[eps_e_v, eps_e_s] = split_epsilon(eps_e);
+[eps_e_v_tr, eps_e_s_tr] = split_epsilon(eps_e_tr);
+
+M = params.M;
+N = params.N;
+
+
+
+sigma = hookes(eps_e, params.K, params.G);
+p = get_p(sigma);
+q = get_q(sigma);
+
+dFdp = (M/N)*(1 - (p/p_i)^(N/(1-N)));
+dFdq = 1;
+
+r1 = eps_e_v - eps_e_v_tr + dlambda*params.beta*dFdp;
+r2 = eps_e_s - eps_e_s_tr + dlambda*dFdq;
+r3 = F_from_sigma(sigma, p_i, params);
+
+r = [r1; r2; r3];
+x = [eps_e_v; eps_e_s; dlambda];
+
+end
+
+function F = F_from_sigma(sigma, p_i, params)
+
+q = get_q(sigma);
+p = get_p(sigma);
+
+M = params.M;
+N = params.N;
+
+eta = (M/N)*(1 - (1-N)*(p./p_i).^(N/(1-N)));
+
+F = q + eta*p;
+
+
+end
+
+
+function [eps_e_v, eps_e_s] = split_epsilon(eps_e)
+eps_e_v = trace(eps_e);
+e_e = eps_e - 1/3*eps_e_v*eye(3);
+eps_e_s = sqrt(2/3)*norm(e_e);
+
 end
 
 function plot_pi(pi, Fk, i)
